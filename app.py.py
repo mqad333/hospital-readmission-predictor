@@ -1,7 +1,8 @@
 import os
+import numpy as np
 import pandas as pd
 import streamlit as st
-from Orange.data import Table, Domain
+from Orange.data import Table, Domain, DiscreteVariable, ContinuousVariable
 import pickle
 
 st.set_page_config(page_title="Hospital Readmission Risk Predictor", layout="wide")
@@ -15,12 +16,44 @@ def load_model():
 
 model = load_model()
 
+def build_model_input_table(raw_table):
+    # Map columns by exact name into model.domain.attributes so no values become NaN
+    src_vars = {v.name: v for v in list(raw_table.domain.attributes) + list(raw_table.domain.metas)}
+    n_rows = len(raw_table)
+    n_attrs = len(model.domain.attributes)
+    X = np.full((n_rows, n_attrs), np.nan)
+
+    for j, target_var in enumerate(model.domain.attributes):
+        if target_var.name not in src_vars:
+            continue
+        s_var = src_vars[target_var.name]
+        for i in range(n_rows):
+            val = raw_table[i, s_var]
+            if np.isnan(float(val)) if isinstance(s_var, ContinuousVariable) else str(val) in ("?", "nan", ""):
+                continue
+            if isinstance(target_var, DiscreteVariable):
+                s_str = str(val).strip()
+                if s_str in target_var.values:
+                    X[i, j] = target_var.values.index(s_str)
+                else:
+                    # Handle numeric-coded discrete values like "1" vs "1.0"
+                    s_clean = s_str[:-2] if s_str.endswith(".0") else s_str
+                    if s_clean in target_var.values:
+                        X[i, j] = target_var.values.index(s_clean)
+            elif isinstance(target_var, ContinuousVariable):
+                try:
+                    X[i, j] = float(val)
+                except ValueError:
+                    pass
+
+    input_domain = Domain(model.domain.attributes)
+    return Table.from_numpy(input_domain, X)
+
 def score_orange_table(data):
-    aligned_data = data.transform(Domain(model.domain.attributes, metas=data.domain.metas))
+    aligned_data = build_model_input_table(data)
     probs = model(aligned_data, model.Probs)
 
     class_values = [str(v).strip() for v in model.domain.class_var.values]
-    # Pick positive readmission class ("<30", "1", "Yes", "True") rather than negative class 0
     pos_idx = len(class_values) - 1
     for candidate in ["<30", "1", "Yes", "yes", "True", "true"]:
         if candidate in class_values:
