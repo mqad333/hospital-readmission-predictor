@@ -1,7 +1,8 @@
 import os
+import numpy as np
 import pandas as pd
 import streamlit as st
-from Orange.data import Table, Domain
+from Orange.data import Table, Domain, ContinuousVariable
 import pickle
 
 st.set_page_config(page_title="Hospital Readmission Risk Predictor", layout="wide")
@@ -15,10 +16,49 @@ def load_model():
 
 model = load_model()
 
+def build_continuized_table(raw_table):
+    src_vars = {v.name: v for v in list(raw_table.domain.attributes) + list(raw_table.domain.metas)}
+    n_rows = len(raw_table)
+    n_attrs = len(model.domain.attributes)
+    X = np.zeros((n_rows, n_attrs), dtype=float)
+
+    # Pre-read raw string & numeric values per column
+    raw_str_cols = {}
+    raw_num_cols = {}
+    for col_name, s_var in src_vars.items():
+        strs = []
+        nums = []
+        for i in range(n_rows):
+            val = raw_table[i, s_var]
+            s_val = str(val).strip()
+            if s_val.endswith(".0"):
+                s_val = s_val[:-2]
+            strs.append(s_val)
+            try:
+                f_val = float(val)
+                nums.append(0.0 if np.isnan(f_val) else f_val)
+            except (ValueError, TypeError):
+                nums.append(np.nan)
+        raw_str_cols[col_name] = strs
+        raw_num_cols[col_name] = nums
+
+    for j, target_var in enumerate(model.domain.attributes):
+        t_name = target_var.name
+        if "=" in t_name:
+            # One-hot encoded feature e.g. "race=Caucasian" or "admission_type_id=1"
+            base_col, expected_val = t_name.split("=", 1)
+            if base_col in raw_str_cols:
+                col_vals = raw_str_cols[base_col]
+                for i in range(n_rows):
+                    X[i, j] = 1.0 if col_vals[i] == expected_val else 0.0
+        elif t_name in raw_num_cols:
+            # Direct numeric feature e.g. "time_in_hospital"
+            X[:, j] = raw_num_cols[t_name]
+
+    return Table.from_numpy(Domain(model.domain.attributes), X)
+
 def score_orange_table(data):
-    # Use Orange's native domain conversion (triggers Continuize/Impute/Normalize stored in model.domain)
-    pred_domain = Domain(model.domain.attributes, metas=data.domain.metas)
-    aligned_data = Table.from_table(pred_domain, data)
+    aligned_data = build_continuized_table(data)
     probs = model(aligned_data, model.Probs)
 
     class_values = [str(v).strip() for v in model.domain.class_var.values]
@@ -81,7 +121,3 @@ if orange_table is not None:
     c4.metric("Low Risk (<25%)", low_cnt)
 
     st.dataframe(scored_df, use_container_width=True)
-
-    with st.expander("Model Feature Diagnostics"):
-        st.write("Model expected features:", [v.name for v in model.domain.attributes][:10])
-        st.write("CSV loaded features:", [v.name for v in orange_table.domain.attributes][:10])
