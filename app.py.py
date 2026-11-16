@@ -22,7 +22,6 @@ def align_to_domain(raw_table, target_domain):
     t_attrs = list(target_domain.attributes)
     X = np.full((n_rows, len(t_attrs)), np.nan)
 
-    # Pre-extract raw string and float values by column name
     raw_strs = {}
     raw_nums = {}
     for name, s_var in src_vars.items():
@@ -60,7 +59,6 @@ def align_to_domain(raw_table, target_domain):
                 for i in range(n_rows):
                     X[i, j] = 1.0 if raw_strs[base_col][i] == exp_val else 0.0
 
-    # Strip compute_value by constructing clean variables with matching names/values
     clean_attrs = []
     for v in t_attrs:
         if isinstance(v, DiscreteVariable):
@@ -72,11 +70,9 @@ def align_to_domain(raw_table, target_domain):
     return Table.from_numpy(clean_domain, X), matched_cols
 
 def score_orange_table(data):
-    # Check if model has original_domain (pre-preprocessing) or direct domain
     orig_dom = getattr(model, "original_domain", None)
     if orig_dom is not None and len(orig_dom.attributes) > 0:
         aligned_data, matched = align_to_domain(data, orig_dom)
-        # Re-attach original_domain variables so model's internal preprocessor runs
         aligned_data = Table.from_numpy(Domain(orig_dom.attributes), aligned_data.X)
     else:
         aligned_data, matched = align_to_domain(data, model.domain)
@@ -84,13 +80,8 @@ def score_orange_table(data):
 
     probs = model(aligned_data, model.Probs)
 
-    class_values = [str(v).strip() for v in model.domain.class_var.values]
-    pos_idx = len(class_values) - 1
-    for candidate in ["<30", "1", "Yes", "yes", "True", "true"]:
-        if candidate in class_values:
-            pos_idx = class_values.index(candidate)
-            break
-
+    # Index 0 corresponds to the positive 30-day readmission class ("<30")
+    pos_idx = 0
     risk_scores = probs[:, pos_idx]
 
     col_names = [var.name for var in data.domain.attributes] + [var.name for var in data.domain.metas]
