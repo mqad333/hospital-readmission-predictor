@@ -1,7 +1,7 @@
 import os
 import pandas as pd
 import streamlit as st
-from Orange.data import Table
+from Orange.data import Table, Domain
 import pickle
 
 st.set_page_config(page_title="Hospital Readmission Risk Predictor", layout="wide")
@@ -15,14 +15,19 @@ def load_model():
 
 model = load_model()
 
-def score_patients(df):
-    temp_csv = "temp_input.csv"
-    df.to_csv(temp_csv, index=False)
-    data = Table.from_file(temp_csv)
-    preds = model(data)
-    probs = model(data, model.Probs)
+def score_orange_table(data):
+    # Align incoming table directly to the trained Orange model domain
+    aligned_data = data.transform(Domain(model.domain.attributes, metas=data.domain.metas))
+    probs = model(aligned_data, model.Probs)
 
-    results = df.copy()
+    # Convert Orange Table back to clean display DataFrame
+    col_names = [var.name for var in data.domain.attributes] + [var.name for var in data.domain.metas]
+    rows = []
+    for inst in data:
+        row = [str(inst[var]) for var in data.domain.attributes] + [str(inst[var]) for var in data.domain.metas]
+        rows.append(row)
+    results = pd.DataFrame(rows, columns=col_names)
+
     class_values = list(model.domain.class_var.values)
     idx_30 = class_values.index("<30") if "<30" in class_values else 0
     risk_scores = probs[:, idx_30]
@@ -40,20 +45,23 @@ mode = st.radio(
     horizontal=True,
 )
 
-target_df = None
+orange_table = None
 if mode == "Automated Cohort (test_patients.csv)":
     if os.path.exists("test_patients.csv"):
-        target_df = pd.read_csv("test_patients.csv")
-        st.success(f"Loaded built-in validation cohort: test_patients.csv ({len(target_df)} patients)")
+        orange_table = Table.from_file("test_patients.csv")
+        st.success(f"Loaded built-in validation cohort: test_patients.csv ({len(orange_table)} patients)")
     else:
         st.error("test_patients.csv not found in repository.")
 else:
     uploaded = st.file_uploader("Upload a patient CSV file to check 30-day readmission risk.", type=["csv"])
     if uploaded is not None:
-        target_df = pd.read_csv(uploaded)
+        temp_path = "uploaded_temp.csv"
+        with open(temp_path, "wb") as f:
+            f.write(uploaded.getbuffer())
+        orange_table = Table.from_file(temp_path)
 
-if target_df is not None:
-    scored_df = score_patients(target_df)
+if orange_table is not None:
+    scored_df = score_orange_table(orange_table)
     high_cnt = int((scored_df["Risk Tier"] == "High Risk").sum())
     mod_cnt = int((scored_df["Risk Tier"] == "Moderate Risk").sum())
     low_cnt = int((scored_df["Risk Tier"] == "Low Risk").sum())
