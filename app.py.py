@@ -2,7 +2,7 @@ import os
 import numpy as np
 import pandas as pd
 import streamlit as st
-from Orange.data import Table, Domain, ContinuousVariable
+from Orange.data import Table, Domain, DiscreteVariable, ContinuousVariable
 import pickle
 
 st.set_page_config(page_title="Hospital Readmission Risk Predictor", layout="wide")
@@ -16,49 +16,72 @@ def load_model():
 
 model = load_model()
 
-def build_continuized_table(raw_table):
+def align_to_domain(raw_table, target_domain):
     src_vars = {v.name: v for v in list(raw_table.domain.attributes) + list(raw_table.domain.metas)}
     n_rows = len(raw_table)
-    n_attrs = len(model.domain.attributes)
-    X = np.zeros((n_rows, n_attrs), dtype=float)
+    t_attrs = list(target_domain.attributes)
+    X = np.full((n_rows, len(t_attrs)), np.nan)
 
-    # Pre-read raw string & numeric values per column
-    raw_str_cols = {}
-    raw_num_cols = {}
-    for col_name, s_var in src_vars.items():
-        strs = []
-        nums = []
+    # Pre-extract raw string and float values by column name
+    raw_strs = {}
+    raw_nums = {}
+    for name, s_var in src_vars.items():
+        s_list, n_list = [], []
         for i in range(n_rows):
             val = raw_table[i, s_var]
-            s_val = str(val).strip()
-            if s_val.endswith(".0"):
-                s_val = s_val[:-2]
-            strs.append(s_val)
+            s = str(val).strip()
+            if s.endswith(".0"):
+                s = s[:-2]
+            s_list.append(s)
             try:
-                f_val = float(val)
-                nums.append(0.0 if np.isnan(f_val) else f_val)
+                fv = float(val)
+                n_list.append(fv)
             except (ValueError, TypeError):
-                nums.append(np.nan)
-        raw_str_cols[col_name] = strs
-        raw_num_cols[col_name] = nums
+                n_list.append(np.nan)
+        raw_strs[name] = s_list
+        raw_nums[name] = n_list
 
-    for j, target_var in enumerate(model.domain.attributes):
-        t_name = target_var.name
-        if "=" in t_name:
-            # One-hot encoded feature e.g. "race=Caucasian" or "admission_type_id=1"
-            base_col, expected_val = t_name.split("=", 1)
-            if base_col in raw_str_cols:
-                col_vals = raw_str_cols[base_col]
+    matched_cols = 0
+    for j, t_var in enumerate(t_attrs):
+        t_name = t_var.name
+        if t_name in src_vars:
+            matched_cols += 1
+            if isinstance(t_var, DiscreteVariable):
                 for i in range(n_rows):
-                    X[i, j] = 1.0 if col_vals[i] == expected_val else 0.0
-        elif t_name in raw_num_cols:
-            # Direct numeric feature e.g. "time_in_hospital"
-            X[:, j] = raw_num_cols[t_name]
+                    s = raw_strs[t_name][i]
+                    if s in t_var.values:
+                        X[i, j] = t_var.values.index(s)
+            elif isinstance(t_var, ContinuousVariable):
+                X[:, j] = raw_nums[t_name]
+        elif "=" in t_name:
+            base_col, exp_val = t_name.split("=", 1)
+            if base_col in raw_strs:
+                matched_cols += 1
+                for i in range(n_rows):
+                    X[i, j] = 1.0 if raw_strs[base_col][i] == exp_val else 0.0
 
-    return Table.from_numpy(Domain(model.domain.attributes), X)
+    # Strip compute_value by constructing clean variables with matching names/values
+    clean_attrs = []
+    for v in t_attrs:
+        if isinstance(v, DiscreteVariable):
+            clean_attrs.append(DiscreteVariable(v.name, values=v.values))
+        else:
+            clean_attrs.append(ContinuousVariable(v.name))
+
+    clean_domain = Domain(clean_attrs)
+    return Table.from_numpy(clean_domain, X), matched_cols
 
 def score_orange_table(data):
-    aligned_data = build_continuized_table(data)
+    # Check if model has original_domain (pre-preprocessing) or direct domain
+    orig_dom = getattr(model, "original_domain", None)
+    if orig_dom is not None and len(orig_dom.attributes) > 0:
+        aligned_data, matched = align_to_domain(data, orig_dom)
+        # Re-attach original_domain variables so model's internal preprocessor runs
+        aligned_data = Table.from_numpy(Domain(orig_dom.attributes), aligned_data.X)
+    else:
+        aligned_data, matched = align_to_domain(data, model.domain)
+        aligned_data = Table.from_numpy(Domain(model.domain.attributes), aligned_data.X)
+
     probs = model(aligned_data, model.Probs)
 
     class_values = [str(v).strip() for v in model.domain.class_var.values]
@@ -85,7 +108,7 @@ def score_orange_table(data):
         "30-Day Readmission Prob (%)": (risk_scores * 100).round(2),
     })
 
-    return pd.concat([pred_df, feat_df], axis=1)
+    return pd.concat([pred_df, feat_df], axis=1), matched
 
 mode = st.radio(
     "Select Data Input Mode:",
@@ -109,7 +132,7 @@ else:
         orange_table = Table.from_file(temp_path)
 
 if orange_table is not None:
-    scored_df = score_orange_table(orange_table)
+    scored_df, matched_cnt = score_orange_table(orange_table)
     high_cnt = int((scored_df["Risk Tier"] == "High Risk").sum())
     mod_cnt = int((scored_df["Risk Tier"] == "Moderate Risk").sum())
     low_cnt = int((scored_df["Risk Tier"] == "Low Risk").sum())
@@ -121,3 +144,4 @@ if orange_table is not None:
     c4.metric("Low Risk (<25%)", low_cnt)
 
     st.dataframe(scored_df, use_container_width=True)
+    st.caption(f"Model: {type(model).__name__} | Matched features: {matched_cnt}")
