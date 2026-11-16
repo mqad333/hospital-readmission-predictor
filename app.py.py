@@ -16,28 +16,35 @@ def load_model():
 model = load_model()
 
 def score_orange_table(data):
-    # Align incoming table directly to the trained Orange model domain
     aligned_data = data.transform(Domain(model.domain.attributes, metas=data.domain.metas))
     probs = model(aligned_data, model.Probs)
 
-    # Convert Orange Table back to clean display DataFrame
+    class_values = [str(v).strip() for v in model.domain.class_var.values]
+    # Pick positive readmission class ("<30", "1", "Yes", "True") rather than negative class 0
+    pos_idx = len(class_values) - 1
+    for candidate in ["<30", "1", "Yes", "yes", "True", "true"]:
+        if candidate in class_values:
+            pos_idx = class_values.index(candidate)
+            break
+
+    risk_scores = probs[:, pos_idx]
+
     col_names = [var.name for var in data.domain.attributes] + [var.name for var in data.domain.metas]
     rows = []
     for inst in data:
         row = [str(inst[var]) for var in data.domain.attributes] + [str(inst[var]) for var in data.domain.metas]
         rows.append(row)
-    results = pd.DataFrame(rows, columns=col_names)
+    feat_df = pd.DataFrame(rows, columns=col_names)
 
-    class_values = list(model.domain.class_var.values)
-    idx_30 = class_values.index("<30") if "<30" in class_values else 0
-    risk_scores = probs[:, idx_30]
+    pred_df = pd.DataFrame({
+        "Risk Tier": [
+            "High Risk" if p >= 0.50 else ("Moderate Risk" if p >= 0.25 else "Low Risk")
+            for p in risk_scores
+        ],
+        "30-Day Readmission Prob (%)": (risk_scores * 100).round(2),
+    })
 
-    results["30-Day Readmission Prob (%)"] = (risk_scores * 100).round(2)
-    results["Risk Tier"] = [
-        "High Risk" if p >= 0.50 else ("Moderate Risk" if p >= 0.25 else "Low Risk")
-        for p in risk_scores
-    ]
-    return results
+    return pd.concat([pred_df, feat_df], axis=1)
 
 mode = st.radio(
     "Select Data Input Mode:",
